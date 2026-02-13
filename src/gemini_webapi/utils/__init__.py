@@ -12,3 +12,4 @@ from .parsing import (
 )
 from .rotate_1psidts import rotate_1psidts
 from .upload_file import upload_file, parse_file_name
+from .selenium_cookie_manager import SeleniumCookieManager

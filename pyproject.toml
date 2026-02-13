@@ -27,6 +27,9 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+selenium = ["undetected-chromedriver>=3.5.0", "selenium>=4.15.0"]
+
 [project.urls]
 Repository = "https://github.com/HanaokaYuzu/Gemini-API"
 Issues = "https://github.com/HanaokaYuzu/Gemini-API/issues"

@@ -31,6 +31,7 @@ from .types import (
     WebImage,
 )
 from .utils import (
+    SeleniumCookieManager,
     get_access_token,
     get_delta_by_fp_len,
     get_nested_value,
@@ -58,6 +59,8 @@ class GeminiClient(GemMixin):
         __Secure-1PSIDTS cookie value, some Google accounts don't require this value, provide only if it's in the cookie list.
     proxy: `str`, optional
         Proxy URL.
+    cookie_manager: `SeleniumCookieManager`, optional
+        Selenium/UC 기반 쿠키 관리자. 직접 전달된 secure_1psid가 없을 때 이 매니저의 쿠키를 사용합니다.
     kwargs: `dict`, optional
         Additional arguments which will be passed to the http client.
         Refer to `httpx.AsyncClient` for more information.
@@ -71,6 +74,7 @@ class GeminiClient(GemMixin):
     __slots__ = [
         "cookies",
         "proxy",
+        "cookie_manager",
         "_running",
         "client",
         "access_token",
@@ -96,11 +100,13 @@ class GeminiClient(GemMixin):
         secure_1psid: str | None = None,
         secure_1psidts: str | None = None,
         proxy: str | None = None,
+        cookie_manager: SeleniumCookieManager | None = None,
         **kwargs,
     ):
         super().__init__()
         self.cookies = Cookies()
         self.proxy = proxy
+        self.cookie_manager = cookie_manager
         self._running: bool = False
         self.client: AsyncClient | None = None
         self.access_token: str | None = None
@@ -124,6 +130,18 @@ class GeminiClient(GemMixin):
             if secure_1psidts:
                 self.cookies.set(
                     "__Secure-1PSIDTS", secure_1psidts, domain=".google.com"
+                )
+        elif cookie_manager and cookie_manager.cookies:
+            cm_cookies = cookie_manager.cookies
+            if "__Secure-1PSID" in cm_cookies:
+                self.cookies.set(
+                    "__Secure-1PSID", cm_cookies["__Secure-1PSID"], domain=".google.com"
+                )
+            if "__Secure-1PSIDTS" in cm_cookies:
+                self.cookies.set(
+                    "__Secure-1PSIDTS",
+                    cm_cookies["__Secure-1PSIDTS"],
+                    domain=".google.com",
                 )
 
     async def init(
@@ -893,6 +911,72 @@ class GeminiClient(GemMixin):
                 f"{type(e).__name__}: {e}; Unexpected response or parsing error. Response: {locals().get('response', 'N/A')}"
             )
             raise APIError(f"Failed to parse response body: {e}")
+
+    async def generate_images(
+        self,
+        prompt: str,
+        count: int = 1,
+        save_path: str = "generated_images",
+        model: Model | str | dict = Model.NANOBANANA_PRO,
+        max_retries: int = 3,
+        **kwargs,
+    ) -> list[str]:
+        """
+        NanoBanana Pro 등 이미지 생성 모델로 N개 요청을 병렬 처리.
+
+        Parameters
+        ----------
+        prompt : str
+            이미지 생성 프롬프트.
+        count : int
+            병렬 요청 수. 각 요청에서 여러 이미지가 생성될 수 있음.
+        save_path : str
+            이미지 저장 경로. 기본값 "generated_images".
+        model : Model | str | dict
+            사용할 모델. 기본값 Model.NANOBANANA_PRO.
+        max_retries : int
+            각 요청의 최대 재시도 횟수. 기본값 3.
+
+        Returns
+        -------
+        list[str]
+            다운로드된 이미지의 절대경로 리스트.
+        """
+
+        async def _generate_with_retry(attempt_id: int) -> ModelOutput | None:
+            await asyncio.sleep(random.uniform(0.5, 2.0) * attempt_id)
+            for retry in range(max_retries):
+                try:
+                    return await self.generate_content(
+                        prompt=prompt, model=model, **kwargs
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"요청 {attempt_id} 실패 (시도 {retry + 1}/{max_retries}): {e}"
+                    )
+                    if retry < max_retries - 1:
+                        await asyncio.sleep(2**retry + random.uniform(0.5, 1.5))
+            return None
+
+        results = await asyncio.gather(
+            *(_generate_with_retry(i) for i in range(count))
+        )
+
+        all_images: list[GeneratedImage] = []
+        for result in results:
+            if isinstance(result, ModelOutput) and result.generated_images:
+                all_images.extend(result.generated_images)
+
+        if not all_images:
+            logger.warning("생성된 이미지가 없습니다.")
+            return []
+
+        download_tasks = [
+            img.save(path=save_path, cookies=self.cookies) for img in all_images
+        ]
+        saved_paths = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        return [p for p in saved_paths if isinstance(p, str)]
 
     def start_chat(self, **kwargs) -> "ChatSession":
         """

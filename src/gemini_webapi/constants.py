@@ -68,6 +68,14 @@ class Model(Enum):
         },
         False,
     )
+    NANOBANANA_PRO = (
+        "nanobanana-pro",
+        {
+            "x-goog-ext-525001261-jspb": '[1,null,null,null,"e6fa609c3fa255c0",null,null,0,[4],null,null,2]',
+            "x-goog-ext-525005358-jspb": '["2617C223-849E-46C7-A854-867983E5595D",1]',
+        },
+        False,
+    )
 
     def __init__(self, name, header, advanced_only):
         self.model_name = name
