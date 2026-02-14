@@ -34,11 +34,23 @@ class SeleniumCookieManager:
         미지정 시 임시 프로필 생성.
     headless : bool
         헤드리스 모드. 쿠키 갱신 시만 사용하며, 최초 수동 로그인은 GUI 필요.
+    browser_executable_path : str | None
+        Chrome 바이너리 경로 (예: CfT 경로). None이면 시스템 Chrome 사용.
+    driver_executable_path : str | None
+        ChromeDriver 바이너리 경로 (예: CfT 경로). None이면 자동 감지.
     """
 
-    def __init__(self, profile_dir: str | None = None, headless: bool = False):
+    def __init__(
+        self,
+        profile_dir: str | None = None,
+        headless: bool = False,
+        browser_executable_path: str | None = None,
+        driver_executable_path: str | None = None,
+    ):
         self.profile_dir = profile_dir
         self.headless = headless
+        self.browser_executable_path = browser_executable_path
+        self.driver_executable_path = driver_executable_path
         self._cookies: dict[str, str] = {}
 
     def _create_driver(self):
@@ -52,6 +64,25 @@ class SeleniumCookieManager:
             )
 
         options = uc.ChromeOptions()
+
+        # CfT 자동 감지: 명시적 경로가 없으면 ~/.cft/ 탐색
+        browser_path = self.browser_executable_path
+        driver_path = self.driver_executable_path
+        if not browser_path:
+            try:
+                from .cft_detector import detect_cft_paths
+
+                cft_browser, cft_driver = detect_cft_paths()
+                if cft_browser:
+                    browser_path = cft_browser
+                    driver_path = driver_path or cft_driver
+                    logger.info(f"CfT 자동 감지: browser={cft_browser}")
+            except Exception as e:
+                logger.debug(f"CfT 자동 감지 실패 (무시): {e}")
+
+        if browser_path:
+            options.binary_location = browser_path
+
         if self.profile_dir:
             profile_path = Path(self.profile_dir).expanduser().resolve()
             profile_path.mkdir(parents=True, exist_ok=True)
@@ -60,7 +91,11 @@ class SeleniumCookieManager:
         if self.headless:
             options.add_argument("--headless=new")
 
-        driver = uc.Chrome(options=options)
+        kwargs = {}
+        if driver_path:
+            kwargs["driver_executable_path"] = driver_path
+
+        driver = uc.Chrome(options=options, **kwargs)
         return driver
 
     async def login_and_get_cookies(self, timeout: int = 300) -> dict[str, str]:
