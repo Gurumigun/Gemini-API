@@ -304,11 +304,67 @@ class GeminiClient(GemMixin):
             except asyncio.CancelledError:
                 raise
             except AuthError:
-                logger.warning(
-                    "AuthError: Failed to refresh cookies. Retrying in next interval."
-                )
+                logger.warning("AuthError: Failed to refresh cookies.")
+                if self.cookie_manager:
+                    logger.info("cookie_manager를 통한 자동 재로그인을 시도합니다...")
+                    await self._auto_relogin()
+                else:
+                    logger.warning(
+                        "cookie_manager가 없어 자동 재로그인 불가. 다음 갱신 주기에 재시도합니다."
+                    )
             except Exception as e:
                 logger.warning(f"Unexpected error while refreshing cookies: {e}")
+
+    async def _auto_relogin(self) -> None:
+        """
+        cookie_manager를 사용해 브라우저 프로필로 쿠키를 재취득하고
+        클라이언트를 재초기화합니다. AuthError 발생 시 자동 호출됩니다.
+        """
+        try:
+            new_cookies_dict = await self.cookie_manager.refresh_cookies()
+            if not new_cookies_dict or "__Secure-1PSID" not in new_cookies_dict:
+                logger.warning("자동 재로그인 실패: 새 쿠키를 가져오지 못했습니다.")
+                return
+
+            new_cookie_jar = Cookies()
+            for key, value in new_cookies_dict.items():
+                new_cookie_jar.set(key, value, domain=".google.com")
+
+            async with self._lock:
+                access_token, build_label, session_id, valid_cookies = (
+                    await get_access_token(
+                        base_cookies=new_cookie_jar,
+                        proxy=self.proxy,
+                        verbose=self.verbose,
+                    )
+                )
+
+                new_client = AsyncClient(
+                    http2=True,
+                    timeout=self.timeout,
+                    proxy=self.proxy,
+                    follow_redirects=True,
+                    headers=Headers.GEMINI.value,
+                    cookies=valid_cookies,
+                    **self.kwargs,
+                )
+
+                old_client = self.client
+                self.client = new_client
+                self.access_token = access_token
+                self.cookies = valid_cookies
+                self.build_label = build_label
+                self.session_id = session_id
+
+                if old_client:
+                    await old_client.aclose()
+
+            logger.success("자동 재로그인 완료.")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"자동 재로그인 실패: {e}")
 
     async def generate_content(
         self,

@@ -95,8 +95,49 @@ class SeleniumCookieManager:
         if driver_path:
             kwargs["driver_executable_path"] = driver_path
 
+        # Chrome 메이저 버전을 감지하여 ChromeDriver 버전 불일치 방지
+        version_main = self._detect_chrome_major_version(browser_path)
+        if version_main:
+            kwargs["version_main"] = version_main
+            logger.debug(f"Chrome 메이저 버전 감지: {version_main}")
+
         driver = uc.Chrome(options=options, **kwargs)
         return driver
+
+    def _detect_chrome_major_version(self, browser_path: str | None) -> int | None:
+        """Chrome 바이너리에서 메이저 버전 번호를 추출."""
+        import subprocess
+
+        candidates = []
+        if browser_path:
+            candidates.append(browser_path)
+        # 시스템 Chrome 경로 후보
+        import platform
+        system = platform.system()
+        if system == "Darwin":
+            candidates.append(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            )
+        elif system == "Linux":
+            candidates.extend(["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"])
+
+        for path in candidates:
+            try:
+                result = subprocess.run(
+                    [path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                # "Google Chrome 144.0.7559.132" → 144
+                version_str = result.stdout.strip()
+                parts = version_str.split()
+                if parts:
+                    major = int(parts[-1].split(".")[0])
+                    return major
+            except Exception:
+                continue
+        return None
 
     async def login_and_get_cookies(self, timeout: int = 300) -> dict[str, str]:
         """
