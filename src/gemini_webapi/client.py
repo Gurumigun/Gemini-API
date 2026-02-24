@@ -319,6 +319,7 @@ class GeminiClient(GemMixin):
         """
         cookie_manager를 사용해 브라우저 프로필로 쿠키를 재취득하고
         클라이언트를 재초기화합니다. AuthError 발생 시 자동 호출됩니다.
+        세션 생성 재시도는 SeleniumCookieManager 내부에서 처리됩니다.
         """
         try:
             new_cookies_dict = await self.cookie_manager.refresh_cookies()

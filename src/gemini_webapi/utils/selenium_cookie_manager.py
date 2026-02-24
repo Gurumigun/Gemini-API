@@ -54,7 +54,7 @@ class SeleniumCookieManager:
         self._cookies: dict[str, str] = {}
 
     def _create_driver(self):
-        """undetected-chromedriver 인스턴스 생성."""
+        """undetected-chromedriver 인스턴스 생성. CfT를 최우선으로 사용."""
         try:
             import undetected_chromedriver as uc
         except ImportError:
@@ -65,20 +65,25 @@ class SeleniumCookieManager:
 
         options = uc.ChromeOptions()
 
-        # CfT 자동 감지: 명시적 경로가 없으면 ~/.cft/ 탐색
-        browser_path = self.browser_executable_path
-        driver_path = self.driver_executable_path
-        if not browser_path:
-            try:
-                from .cft_detector import detect_cft_paths
+        # CfT 최우선 사용: 항상 CfT를 먼저 탐색하고, 없을 때만 명시적 경로/시스템 Chrome 사용
+        browser_path = None
+        driver_path = None
+        try:
+            from .cft_detector import detect_cft_paths
 
-                cft_browser, cft_driver = detect_cft_paths()
-                if cft_browser:
-                    browser_path = cft_browser
-                    driver_path = driver_path or cft_driver
-                    logger.info(f"CfT 자동 감지: browser={cft_browser}")
-            except Exception as e:
-                logger.debug(f"CfT 자동 감지 실패 (무시): {e}")
+            cft_browser, cft_driver = detect_cft_paths()
+            if cft_browser:
+                browser_path = cft_browser
+                driver_path = cft_driver
+                logger.info(f"CfT 최우선 사용: browser={cft_browser}, driver={cft_driver}")
+        except Exception as e:
+            logger.debug(f"CfT 자동 감지 실패: {e}")
+
+        # CfT를 찾지 못한 경우 명시적 경로 사용
+        if not browser_path:
+            browser_path = self.browser_executable_path
+        if not driver_path:
+            driver_path = self.driver_executable_path
 
         if browser_path:
             options.binary_location = browser_path
@@ -90,6 +95,11 @@ class SeleniumCookieManager:
 
         if self.headless:
             options.add_argument("--headless=new")
+
+        # 렌더러 연결 안정성 향상 옵션
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
 
         kwargs = {}
         if driver_path:
@@ -139,7 +149,7 @@ class SeleniumCookieManager:
                 continue
         return None
 
-    async def login_and_get_cookies(self, timeout: int = 300) -> dict[str, str]:
+    async def login_and_get_cookies(self, timeout: int = 300, max_retries: int = 2) -> dict[str, str]:
         """
         UC 브라우저를 열고 사용자가 Google 로그인할 때까지 대기 후 쿠키 추출.
 
@@ -150,6 +160,8 @@ class SeleniumCookieManager:
         ----------
         timeout : int
             로그인 대기 시간 (초). 기본값 300초 (5분).
+        max_retries : int
+            세션 생성 실패 시 재시도 횟수. 기본값 2.
 
         Returns
         -------
@@ -161,9 +173,8 @@ class SeleniumCookieManager:
         TimeoutError
             지정된 시간 내에 로그인이 완료되지 않은 경우.
         """
-        driver = None
+        driver = await self._create_driver_with_retry(max_retries)
         try:
-            driver = await asyncio.to_thread(self._create_driver)
             await asyncio.to_thread(driver.get, GEMINI_URL)
             logger.info(
                 f"브라우저가 열렸습니다. {timeout}초 내에 Google 계정으로 로그인하세요."
@@ -182,14 +193,21 @@ class SeleniumCookieManager:
             logger.success("쿠키 추출 완료.")
             return cookies
         finally:
-            if driver:
+            try:
                 await asyncio.to_thread(driver.quit)
+            except Exception:
+                pass
 
-    async def get_cookies_from_profile(self) -> dict[str, str]:
+    async def get_cookies_from_profile(self, max_retries: int = 2) -> dict[str, str]:
         """
         이미 로그인된 Chrome 프로필에서 쿠키 추출.
 
         별도 로그인 없이 기존 프로필 디렉토리의 세션을 사용합니다.
+
+        Parameters
+        ----------
+        max_retries : int
+            세션 생성 실패 시 재시도 횟수. 기본값 2.
 
         Returns
         -------
@@ -209,9 +227,8 @@ class SeleniumCookieManager:
                 "기존 프로필을 사용하려면 profile_dir을 지정하세요."
             )
 
-        driver = None
+        driver = await self._create_driver_with_retry(max_retries)
         try:
-            driver = await asyncio.to_thread(self._create_driver)
             await asyncio.to_thread(driver.get, GEMINI_URL)
 
             # 프로필이 이미 로그인 상태이므로 짧은 대기 후 쿠키 추출
@@ -220,8 +237,10 @@ class SeleniumCookieManager:
             logger.success("프로필에서 쿠키 추출 완료.")
             return cookies
         finally:
-            if driver:
+            try:
                 await asyncio.to_thread(driver.quit)
+            except Exception:
+                pass
 
     async def refresh_cookies(self) -> dict[str, str]:
         """
@@ -286,6 +305,26 @@ class SeleniumCookieManager:
         return self._cookies
 
     # --- 내부 메소드 ---
+
+    async def _create_driver_with_retry(self, max_retries: int = 2):
+        """세션 생성 실패 시 재시도하며 드라이버를 생성."""
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    wait_sec = 3 * attempt
+                    logger.info(f"브라우저 세션 재시도 ({attempt}/{max_retries}), {wait_sec}초 대기...")
+                    await asyncio.sleep(wait_sec)
+                driver = await asyncio.to_thread(self._create_driver)
+                return driver
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                if "session not created" in error_msg or "unable to connect to renderer" in error_msg:
+                    logger.warning(f"브라우저 세션 생성 실패 (시도 {attempt + 1}/{max_retries + 1}): {e}")
+                    continue
+                raise
+        raise last_error
 
     async def _poll_for_cookie(
         self, driver, timeout: int
