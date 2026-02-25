@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json as stdlib_json
+import os
+import signal
 import time
 from pathlib import Path
 
@@ -91,6 +93,7 @@ class SeleniumCookieManager:
         if self.profile_dir:
             profile_path = Path(self.profile_dir).expanduser().resolve()
             profile_path.mkdir(parents=True, exist_ok=True)
+            self._repair_profile_if_corrupted(profile_path)
             options.add_argument(f"--user-data-dir={profile_path}")
 
         if self.headless:
@@ -100,6 +103,10 @@ class SeleniumCookieManager:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
+        # 비정상 종료 후 세션 복원 프롬프트 방지
+        options.add_argument("--no-first-run")
+        options.add_argument("--disable-session-crashed-bubble")
+        options.add_argument("--hide-crash-restore-bubble")
 
         kwargs = {}
         if driver_path:
@@ -306,12 +313,74 @@ class SeleniumCookieManager:
 
     # --- 내부 메소드 ---
 
+
+
+    def _repair_profile_if_corrupted(self, profile_path: Path) -> None:
+        """손상된 Chrome 프로필을 복구하여 브라우저 시작 실패를 방지.
+
+        Preferences/Local State 파일이 0바이트이거나 유효한 JSON이 아니면
+        해당 파일을 삭제하여 Chrome이 새로 생성하도록 함.
+        """
+        import json as _json
+
+        targets = ["Default/Preferences", "Local State"]
+        for rel in targets:
+            fpath = profile_path / rel
+            if not fpath.exists():
+                continue
+
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+                if not content.strip():
+                    raise ValueError("빈 파일")
+                _json.loads(content)
+            except (ValueError, _json.JSONDecodeError) as e:
+                logger.warning(f"손상된 프로필 파일 감지 ({rel}): {e} → 삭제하여 재생성 유도")
+                try:
+                    fpath.unlink()
+                except OSError as oe:
+                    logger.warning(f"프로필 파일 삭제 실패 ({rel}): {oe}")
+
+    def _cleanup_profile_locks(self) -> None:
+        """Chrome 프로필 디렉토리의 잠금 파일을 정리하여 세션 재생성을 가능하게 함."""
+        if not self.profile_dir:
+            return
+
+        profile_path = Path(self.profile_dir)
+        if not profile_path.exists():
+            return
+
+        lock_files = ["SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"]
+        for lock_name in lock_files:
+            lock_path = profile_path / lock_name
+            if not lock_path.exists() and not lock_path.is_symlink():
+                continue
+
+            # Linux/Mac: SingletonLock은 symlink로 PID를 포함함
+            if lock_name == "SingletonLock" and os.name != "nt":
+                try:
+                    link_target = os.readlink(str(lock_path))
+                    # 형식: hostname-pid
+                    pid_str = link_target.split("-")[-1]
+                    pid = int(pid_str)
+                    os.kill(pid, signal.SIGKILL)
+                    logger.info(f"Chrome 프로세스 종료 (PID: {pid})")
+                except (ValueError, ProcessLookupError, OSError):
+                    pass
+
+            try:
+                lock_path.unlink(missing_ok=True)
+                logger.info(f"잠금 파일 제거: {lock_path.name}")
+            except OSError as e:
+                logger.warning(f"잠금 파일 제거 실패 ({lock_path.name}): {e}")
+
     async def _create_driver_with_retry(self, max_retries: int = 2):
-        """세션 생성 실패 시 재시도하며 드라이버를 생성."""
+        """세션 생성 실패 시 프로필 잠금을 정리하고 재시도하며 드라이버를 생성."""
         last_error = None
         for attempt in range(max_retries + 1):
             try:
                 if attempt > 0:
+                    self._cleanup_profile_locks()
                     wait_sec = 3 * attempt
                     logger.info(f"브라우저 세션 재시도 ({attempt}/{max_retries}), {wait_sec}초 대기...")
                     await asyncio.sleep(wait_sec)
